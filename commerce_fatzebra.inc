@@ -34,7 +34,16 @@ function commerce_fatzebra_purchase($request_values, $settings) {
     $fraud_data
   );
 
-  return $gw->purchase($purchase_request);
+  $result = null;
+  try {
+    $result = $gw->purchase($purchase_request);
+  } catch(FatZebra\TimeoutExcepton $ex) {
+    error_log("Gateway timeout encountered - attempting to fetch payment for " . $request_values['reference']);
+    $result = $gw->get_purchase($request_values['reference']);
+    error_log("Fetch on timeout successful");
+  }
+  
+  return $result;
 }
 
 /**
@@ -50,7 +59,16 @@ function commerce_fatzebra_purchase($request_values, $settings) {
 function commerce_fatzebra_token_purchase($token, $amount, $reference, $settings, $cvv = null) {
   $gw = commerce_fatzebra_gateway($settings);
 
-  return $gw->token_purchase($token, $amount, $reference);
+  $result = null;
+  try {
+    $result = $gw->token_purchase($token, $amount, $reference);
+  } catch(FatZebra\TimeoutExcepton $ex) {
+    error_log("Gateway timeout encountered - attempting to fetch payment for " . $request_values['reference']);
+    $result = $gw->get_purchase($reference);
+    error_log("Fetch on timeout successful");
+  }
+  
+  return $result;
 }
 
 /**
@@ -67,11 +85,20 @@ function commerce_fatzebra_token_purchase($token, $amount, $reference, $settings
 function commerce_fatzebra_refund($request_values, $settings) {
   $gw = commerce_fatzebra_gateway($settings);
 
-  return $gw->refund(
-    $request_values["transaction_id"],
-    $request_values["amount"],
-    $request_values["reference"]
-  );
+  $result = null;
+  try {
+    $result = $gw->refund(
+      $request_values["transaction_id"],
+      $request_values["amount"],
+      $request_values["reference"]
+    );
+  } catch(FatZebra\TimeoutExcepton $ex) {
+    error_log("Gateway timeout encountered - attempting to fetch refund for " . $request_values['reference']);
+    $result = $gw->get_refund($reference);
+    error_log("Fetch on timeout successful");
+  }
+  
+  return $result;
 }
 
 function commerce_fatzebra_gateway($settings) {
@@ -86,7 +113,6 @@ function commerce_fatzebra_gateway($settings) {
     $transaction_mode,
     $settings['gateway']
   );
-  $gw->timeout = 30;
 
   return $gw;
 }
@@ -116,6 +142,20 @@ function commerce_fatzebra_response_process($response, $order_id, $payment_metho
 
   // The instance ID identifies which payment method instance was used for this transaction
   $transaction->instance_id = $payment_method['instance_id'];
+
+  // If response is null assume we didn't receive anything from the gateway (timeout, fetch failed)
+  if ($response == null) {
+    // Timeout assumes, so mark as failed :(
+    $transaction->status = COMMERCE_PAYMENT_STATUS_FAILURE;
+    $transaction->message_variables['@status'] = 'failed';
+    
+    // Now report the bad news to the customer :(
+    $transaction->message_variables['@statusdetail'] = "Error communicating with gateway. Timeout assumed.";
+    $process_result = t("There was a problem communicating with the payment gateway: No response received or request timed out. Please try again or contact @site_mail for help.", array('@site_mail' => variable_get('site_mail', '')));
+    watchdog('commerce_fatzebra', 'API Error: Response is null. Timeout assumed.', array(), WATCHDOG_ERROR);
+    commerce_payment_transaction_save($transaction);
+    return $process_result;
+  }
 
   // Set the transaction status and text based on response success values.
   if ($response->successful && $response->response->successful) {
